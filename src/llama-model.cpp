@@ -4916,6 +4916,13 @@ struct llm_build_llama : public llm_graph_context {
 
         ggml_tensor * inp_out_ids = build_inp_out_ids();
 
+        // if the graph supports reusing, we perform the check after creating all input tensors
+        // important: make sure that no input tenors are created after this point
+        if (res_prv && res->is_same(res_prv)) {
+            can_reuse = true;
+            return;
+        }
+
         for (int il = 0; il < n_layer; ++il) {
             ggml_tensor * inpSA = inpL;
 
@@ -7079,6 +7086,11 @@ struct llm_build_qwen2 : public llm_graph_context {
 
         ggml_tensor * inp_out_ids = build_inp_out_ids();
 
+        if (res_prv && res->is_same(res_prv)) {
+            can_reuse = true;
+            return;
+        }
+
         for (int il = 0; il < n_layer; ++il) {
             ggml_tensor * inpSA = inpL;
 
@@ -9072,6 +9084,11 @@ struct llm_build_gemma3_iswa : public llm_graph_context {
         auto * inp_attn = build_attn_inp_kv_unified_iswa();
 
         ggml_tensor * inp_out_ids = build_inp_out_ids();
+
+        if (res_prv && res->is_same(res_prv)) {
+            can_reuse = true;
+            return;
+        }
 
         for (int il = 0; il < n_layer; ++il) {
             const float freq_base_l  = model.get_rope_freq_base (cparams, il);
@@ -14751,11 +14768,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
     return res;
 }
 
-llm_graph_result_ptr llama_model::build_graph(
+bool llama_model::build_graph(
         const llm_graph_params & params,
-                   ggml_cgraph * gf,
                 llm_graph_type   type) const {
     std::unique_ptr<llm_graph_context> llm;
+
+    auto * gf = params.gf_res_cur->get_gf();
 
     switch (arch) {
         case LLM_ARCH_LLAMA:
@@ -15047,7 +15065,7 @@ llm_graph_result_ptr llama_model::build_graph(
     // add on pooling layer
     llm->build_pooling(gf, cls, cls_b, cls_out, cls_out_b);
 
-    return std::move(llm->res);
+    return llm->can_reuse;
 }
 
 //

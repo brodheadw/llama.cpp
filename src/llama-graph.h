@@ -78,10 +78,18 @@ public:
     virtual ~llm_graph_input_i() = default;
 
     virtual void set_input(const llama_ubatch * ubatch) = 0;
+
+    virtual void update(llama_memory_context_i * mctx) {
+        GGML_UNUSED(mctx);
+    }
+
+    virtual bool is_same(const llm_graph_input_i * other) const {
+        GGML_UNUSED(other);
+        return false;
+    }
 };
 
 using llm_graph_input_ptr = std::unique_ptr<llm_graph_input_i>;
-
 
 class llm_graph_input_embd : public llm_graph_input_i {
 public:
@@ -89,6 +97,8 @@ public:
     virtual ~llm_graph_input_embd() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+
+    bool is_same(const llm_graph_input_i * other) const override;
 
     ggml_tensor * tokens = nullptr; // I32 [n_batch]
     ggml_tensor * embd   = nullptr; // F32 [n_embd, n_batch]
@@ -100,6 +110,8 @@ public:
     virtual ~llm_graph_input_pos() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+
+    bool is_same(const llm_graph_input_i * other) const override;
 
     ggml_tensor * pos = nullptr; // I32 [n_batch]
 
@@ -158,6 +170,8 @@ public:
     virtual ~llm_graph_input_out_ids() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+
+    bool is_same(const llm_graph_input_i * other) const override;
 
     ggml_tensor * out_ids; // I32 [n_outputs]
 
@@ -249,6 +263,10 @@ public:
 
     void set_input(const llama_ubatch * ubatch) override;
 
+    void update(llama_memory_context_i * mctx) override;
+
+    bool is_same(const llm_graph_input_i * other) const override;
+
     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
     ggml_tensor * get_v_idxs() const { return self_v_idxs; }
 
@@ -279,6 +297,10 @@ public:
     ~llm_graph_input_attn_kv_unified_iswa() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+
+    void update(llama_memory_context_i * mctx) override;
+
+    bool is_same(const llm_graph_input_i * other) const override;
 
     ggml_tensor * get_k_idxs()     const { return self_k_idxs; }
     ggml_tensor * get_v_idxs()     const { return self_v_idxs; }
@@ -377,12 +399,20 @@ class llm_graph_result_i {
 public:
     virtual ~llm_graph_result_i() = default;
 
-    virtual ggml_tensor * get_tokens()      = 0;
-    virtual ggml_tensor * get_logits()      = 0;
-    virtual ggml_tensor * get_embd()        = 0;
-    virtual ggml_tensor * get_embd_pooled() = 0;
+    virtual ggml_tensor * get_tokens()      const = 0;
+    virtual ggml_tensor * get_logits()      const = 0;
+    virtual ggml_tensor * get_embd()        const = 0;
+    virtual ggml_tensor * get_embd_pooled() const = 0;
+
+    virtual ggml_cgraph  * get_gf()  = 0;
+    virtual ggml_context * get_ctx() = 0;
+
+    virtual void init() = 0;
+    virtual void reserve(int64_t max_nodes) = 0;
 
     virtual void set_inputs(const llama_ubatch * ubatch) = 0;
+
+    virtual void update(llama_memory_context_i * mctx) = 0;
 };
 
 using llm_graph_result_ptr = std::unique_ptr<llm_graph_result_i>;
@@ -392,15 +422,63 @@ class llm_graph_result : public llm_graph_result_i {
 public:
     virtual ~llm_graph_result() = default;
 
-    ggml_tensor * get_tokens()      override { return t_tokens; }
-    ggml_tensor * get_logits()      override { return t_logits; }
-    ggml_tensor * get_embd()        override { return t_embd; }
-    ggml_tensor * get_embd_pooled() override { return t_embd_pooled; }
+    ggml_tensor * get_tokens()      const override { return t_tokens; }
+    ggml_tensor * get_logits()      const override { return t_logits; }
+    ggml_tensor * get_embd()        const override { return t_embd; }
+    ggml_tensor * get_embd_pooled() const override { return t_embd_pooled; }
+
+    ggml_cgraph  * get_gf()  override { return gf; }
+    ggml_context * get_ctx() override { return ctx_compute.get(); }
+
+    void init() override {
+        t_tokens      = nullptr;
+        t_logits      = nullptr;
+        t_embd        = nullptr;
+        t_embd_pooled = nullptr;
+
+        inputs.clear();
+
+        ggml_init_params params = {
+            /*.mem_size   =*/ buf_compute_meta.size(),
+            /*.mem_buffer =*/ buf_compute_meta.data(),
+            /*.no_alloc   =*/ true,
+        };
+
+        ctx_compute.reset(ggml_init(params));
+
+        gf = ggml_new_graph_custom(ctx_compute.get(), max_nodes, false);
+    }
+
+    void reserve(int64_t max_nodes) override {
+        buf_compute_meta.resize(ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false));
+
+        this->max_nodes = max_nodes;
+    }
 
     void set_inputs(const llama_ubatch * ubatch) override {
         for (auto & input : inputs) {
             input->set_input(ubatch);
         }
+    }
+
+    void update(llama_memory_context_i * mctx) override {
+        for (auto & input : inputs) {
+            input->update(mctx);
+        }
+    }
+
+    bool is_same(llm_graph_result * other) {
+        if (inputs.size() != other->inputs.size()) {
+            return false;
+        }
+
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (!inputs[i]->is_same(other->inputs[i].get())) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     llm_graph_input_i * add_input(llm_graph_input_ptr input) {
@@ -415,6 +493,15 @@ public:
     ggml_tensor * t_embd_pooled = nullptr;
 
     std::vector<llm_graph_input_ptr> inputs;
+
+    ggml_context_ptr ctx_compute;
+
+    // memory buffers used to evaluate the model
+    std::vector<uint8_t> buf_compute_meta;
+
+    ggml_cgraph * gf;
+
+    int64_t max_nodes;
 };
 
 //
@@ -426,6 +513,9 @@ using llm_graph_cb = std::function<void(const llama_ubatch & ubatch, ggml_tensor
 
 struct llm_graph_params {
     ggml_context * ctx;
+
+    llm_graph_result * gf_res_cur;
+    llm_graph_result * gf_res_prv;
 
     const llm_arch arch;
 
@@ -498,7 +588,10 @@ struct llm_graph_context {
 
     const llm_graph_cb & cb_func;
 
-    std::unique_ptr<llm_graph_result> res;
+    bool can_reuse;
+
+    llm_graph_result * res;
+    llm_graph_result * res_prv;
 
     llm_graph_context(const llm_graph_params & params);
     virtual ~llm_graph_context() = default;

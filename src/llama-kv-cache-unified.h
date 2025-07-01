@@ -121,6 +121,9 @@ public:
 
     uint32_t get_n_kv() const;
 
+    // TODO: temporary
+    bool get_supports_set_rows() const;
+
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv) const;
@@ -193,12 +196,14 @@ private:
 
     // env: LLAMA_SET_ROWS (temporary)
     // ref: https://github.com/ggml-org/llama.cpp/pull/14285
-    int supports_set_rows = false;
+    bool supports_set_rows = false;
 
     const llama_swa_type swa_type = LLAMA_SWA_TYPE_NONE;
 
     std::vector<ggml_context_ptr>        ctxs;
     std::vector<ggml_backend_buffer_ptr> bufs;
+
+    llm_graph_result_ptr gf_res;
 
     llama_kv_cells_unified cells;
 
@@ -287,6 +292,9 @@ public:
     //
 
     uint32_t get_n_kv() const;
+
+    // TODO: temporary
+    bool get_supports_set_rows() const;
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;

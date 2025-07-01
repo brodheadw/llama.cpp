@@ -64,6 +64,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         return it->second;
     };
 
+    gf_res.reset(new llm_graph_result());
+
     head = 0;
 
     cells.resize(kv_size);
@@ -158,7 +160,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
     const char * LLAMA_SET_ROWS = getenv("LLAMA_SET_ROWS");
-    supports_set_rows = LLAMA_SET_ROWS ? atoi(LLAMA_SET_ROWS) : 0;
+    supports_set_rows = LLAMA_SET_ROWS ? atoi(LLAMA_SET_ROWS) != 0 : 0;
 
     if (!supports_set_rows) {
         LLAMA_LOG_WARN("%s: LLAMA_SET_ROWS=0, using old ggml_cpy() method for backwards compatibility\n", __func__);
@@ -475,9 +477,13 @@ bool llama_kv_cache_unified::update(llama_context * lctx, bool do_shift, const d
         if (hparams.rope_type != LLAMA_ROPE_TYPE_NONE) {
             ggml_backend_sched_reset(sched);
 
-            auto * gf = lctx->graph_init();
+            // TODO: tmp
+            gf_res->reserve(lctx->graph_max_nodes());
+            gf_res->init();
 
-            auto res = build_graph_shift(lctx->get_cparams(), lctx->get_ctx_compute(), gf);
+            auto * gf = gf_res->get_gf();
+
+            auto res = build_graph_shift(lctx->get_cparams(), gf_res->get_ctx(), gf);
             if (!res) {
                 LLAMA_LOG_ERROR("%s: failed to build graph for K-shift\n", __func__);
                 return updated;
@@ -524,9 +530,13 @@ bool llama_kv_cache_unified::update(llama_context * lctx, bool do_shift, const d
 
         ggml_backend_sched_reset(sched);
 
-        auto * gf = lctx->graph_init();
+        // TODO: tmp
+        gf_res->reserve(lctx->graph_max_nodes());
+        gf_res->init();
 
-        auto res = build_graph_defrag(lctx->get_cparams(), lctx->get_ctx_compute(), gf, dinfo);
+        auto * gf = gf_res->get_gf();
+
+        auto res = build_graph_defrag(lctx->get_cparams(), gf_res->get_ctx(), gf, dinfo);
         if (!res) {
             LLAMA_LOG_ERROR("%s: failed to build graph for defrag\n", __func__);
             return updated;
@@ -773,6 +783,10 @@ bool llama_kv_cache_unified::get_has_shift() const {
 
 uint32_t llama_kv_cache_unified::get_n_kv() const {
     return std::min(cells.size(), std::max(n_pad, GGML_PAD(cells.used_max_p1(), n_pad)));
+}
+
+bool llama_kv_cache_unified::get_supports_set_rows() const {
+    return supports_set_rows;
 }
 
 ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv) const {
@@ -1933,6 +1947,10 @@ const llama_ubatch & llama_kv_cache_unified_context::get_ubatch() const {
 
 uint32_t llama_kv_cache_unified_context::get_n_kv() const {
     return n_kv;
+}
+
+bool llama_kv_cache_unified_context::get_supports_set_rows() const {
+    return kv->get_supports_set_rows();
 }
 
 ggml_tensor * llama_kv_cache_unified_context::get_k(ggml_context * ctx, int32_t il) const {

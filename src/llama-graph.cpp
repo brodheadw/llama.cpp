@@ -13,6 +13,10 @@
 #include <cmath>
 #include <cstring>
 
+static bool are_same(ggml_tensor * a, ggml_tensor * b) {
+    return (!a && !b) || (a && b && ggml_are_same_shape(a, b) && ggml_are_same_stride(a,b));
+}
+
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
         const int64_t n_tokens = ubatch->n_tokens;
@@ -26,6 +30,14 @@ void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
 
         ggml_backend_tensor_set(embd, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(embd));
     }
+}
+
+bool llm_graph_input_embd::is_same(const llm_graph_input_i * other) const {
+    // TODO: how to avoid these dynamic casts?
+    const auto * o = dynamic_cast<const llm_graph_input_embd *>(other);
+    return o &&
+        are_same(tokens, o->tokens) &&
+        are_same(embd,   o->embd);
 }
 
 void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
@@ -48,6 +60,11 @@ void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
             ggml_backend_tensor_set(pos, ubatch->pos, 0, n_tokens*n_pos_per_embd*ggml_element_size(pos));
         }
     }
+}
+
+bool llm_graph_input_pos::is_same(const llm_graph_input_i * other) const {
+    const auto * o = dynamic_cast<const llm_graph_input_pos *>(other);
+    return o && are_same(pos, o->pos);
 }
 
 void llm_graph_input_attn_temp::set_input(const llama_ubatch * ubatch) {
@@ -116,6 +133,11 @@ void llm_graph_input_out_ids::set_input(const llama_ubatch * ubatch) {
             data[n_outputs++] = i;
         }
     }
+}
+
+bool llm_graph_input_out_ids::is_same(const llm_graph_input_i * other) const {
+    const auto * o = dynamic_cast<const llm_graph_input_out_ids *>(other);
+    return o && are_same(out_ids, o->out_ids);
 }
 
 void llm_graph_input_mean::set_input(const llama_ubatch * ubatch) {
@@ -287,6 +309,19 @@ void llm_graph_input_attn_kv_unified::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
 }
 
+void llm_graph_input_attn_kv_unified::update(llama_memory_context_i * mctx) {
+    this->mctx = static_cast<const llama_kv_cache_unified_context *>(mctx);
+}
+
+bool llm_graph_input_attn_kv_unified::is_same(const llm_graph_input_i * other) const {
+    const auto * o = dynamic_cast<const llm_graph_input_attn_kv_unified *>(other);
+    return o && mctx->get_supports_set_rows() &&
+        are_same(self_k_idxs,      o->self_k_idxs)  &&
+        are_same(self_v_idxs,      o->self_v_idxs)  &&
+        are_same(self_kq_mask,     o->self_kq_mask) &&
+        are_same(self_kq_mask_cnv, o->self_kq_mask_cnv);
+}
+
 void llm_graph_input_attn_kv_unified_iswa::set_input(const llama_ubatch * ubatch) {
     mctx->get_base()->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->get_base()->set_input_v_idxs(self_v_idxs, ubatch);
@@ -297,6 +332,23 @@ void llm_graph_input_attn_kv_unified_iswa::set_input(const llama_ubatch * ubatch
     mctx->get_swa()->set_input_v_idxs(self_v_idxs_swa, ubatch);
 
     mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
+}
+
+void llm_graph_input_attn_kv_unified_iswa::update(llama_memory_context_i * mctx) {
+    this->mctx = static_cast<const llama_kv_cache_unified_iswa_context *>(mctx);
+}
+
+bool llm_graph_input_attn_kv_unified_iswa::is_same(const llm_graph_input_i * other) const {
+    const auto * o = dynamic_cast<const llm_graph_input_attn_kv_unified_iswa *>(other);
+    return o && mctx->get_base()->get_supports_set_rows() != 0 &&
+        are_same(self_k_idxs,          o->self_k_idxs)      &&
+        are_same(self_v_idxs,          o->self_v_idxs)      &&
+        are_same(self_k_idxs_swa,      o->self_k_idxs_swa)  &&
+        are_same(self_v_idxs_swa,      o->self_v_idxs_swa)  &&
+        are_same(self_kq_mask,         o->self_kq_mask)     &&
+        are_same(self_kq_mask_cnv,     o->self_kq_mask_cnv) &&
+        are_same(self_kq_mask_swa,     o->self_kq_mask_swa) &&
+        are_same(self_kq_mask_swa_cnv, o->self_kq_mask_swa_cnv);
 }
 
 void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
@@ -403,7 +455,9 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     mctx             (params.mctx),
     cross            (params.cross),
     cb_func          (params.cb),
-    res              (std::make_unique<llm_graph_result>()) {
+    can_reuse        (false),
+    res              (params.gf_res_cur),
+    res_prv          (params.gf_res_prv) {
     }
 
 void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {

@@ -35,8 +35,6 @@ struct llama_context {
 
     ggml_backend_sched_t get_sched() const;
 
-    ggml_context * get_ctx_compute() const;
-
     uint32_t n_ctx()         const;
     uint32_t n_ctx_per_seq() const;
     uint32_t n_batch()       const;
@@ -96,7 +94,7 @@ struct llama_context {
     // if memory_context is provided, it will be applied first to the context's memory
     // ret contains the status of the graph computation
     // returns nullptr only if ret != GGML_STATUS_SUCCESS
-    llm_graph_result_ptr process_ubatch(
+    llm_graph_result_i * process_ubatch(
                 const llama_ubatch & ubatch,
                     llm_graph_type   gtype,
             llama_memory_context_i * mctx,
@@ -190,9 +188,6 @@ private:
 public:
     int32_t graph_max_nodes() const;
 
-    // zero-out inputs and create the ctx_compute for the compute graph
-    ggml_cgraph * graph_init();
-
     // returns the result of ggml_backend_sched_graph_compute_async execution
     ggml_status graph_compute(ggml_cgraph * gf, bool batched);
 
@@ -200,9 +195,10 @@ public:
     ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx);
 
 private:
-    llm_graph_result_ptr graph_build(
-                      ggml_context * ctx,
-                       ggml_cgraph * gf,
+    // true - can reuse prev graph
+    bool graph_build(
+                llm_graph_result_i * gf_res_cur,
+                llm_graph_result_i * gf_res_prv,
                 const llama_ubatch & ubatch,
                     llm_graph_type   gtype,
       const llama_memory_context_i * mctx);
@@ -258,8 +254,6 @@ private:
     ggml_backend_t backend_cpu = nullptr;
     std::vector<ggml_backend_ptr> backends;
 
-    ggml_context_ptr ctx_compute;
-
     // training
     ggml_opt_context_t opt_ctx = nullptr;
 
@@ -275,8 +269,29 @@ private:
     std::vector<ggml_backend_t>             backend_ptrs;
     std::vector<ggml_backend_buffer_type_t> backend_buft;
 
-    // memory buffers used to evaluate the model
-    std::vector<uint8_t> buf_compute_meta;
+    // ==================================
+    // double-buffer for compute graphs
+    // TODO: polish this rough first iteration
+    //
+    std::array<llm_graph_result_ptr, 2> gf_res;
+
+    int gf_res_i = 0;
+
+    llm_graph_result_i * gf_res_next() {
+        gf_res_i = gf_res_i == 0 ? 1 : 0;
+        return gf_res[gf_res_i].get();
+    }
+
+    llm_graph_result_i * gf_res_cur() const {
+        return gf_res[gf_res_i].get();
+    }
+
+    llm_graph_result_i * gf_res_prv() const {
+        return gf_res[(gf_res_i + 1) % 2].get();
+    }
+
+    llm_graph_result_ptr gf_res_reserve;
+    // ==================================
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;
